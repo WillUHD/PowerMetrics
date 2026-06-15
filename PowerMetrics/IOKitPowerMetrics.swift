@@ -289,12 +289,15 @@ final class IOKitPowerMetrics: @unchecked Sendable {
         
         var type: ChannelType = .unknown
         var canonicalCluster = ""
-        
+
         if group == "Energy Model" {
             let lowerName = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            
             if lowerName.hasPrefix("cpu") {
+                // CPU needs prefix because it has multiple complexes/clusters
                 type = .cpuEnergy
-            } else if lowerName.hasPrefix("gpu") {
+            } else if lowerName == "gpu" {
+                // GPU uses exact match to avoid doubling with "GPU Energy"
                 type = .gpuEnergy
             } else if lowerName.hasPrefix("ane") {
                 type = .aneEnergy

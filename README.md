@@ -1,8 +1,8 @@
 # PowerMetrics
 An easy to use Intel Power Gadget style power monitor. Quick features: 
-- **Passwordless**: uses IOKit bindings for hardware reports instead of `powermetrics`
-- **Lightweight**: uses the same or less nominal CPU % compared to Mx Power Gadget
-- **Accurate**: the native power and frequency reporting from IOKit instead of MxPG's utilization scale-down
+- **Passwordless**: uses IOKit bindings instead of `powermetrics`
+- **Lightweight**: uses similar or less CPU % compared to Mx Power Gadget
+- **Accurate**: raw IOKit power and frequency instead of MxPG's scale-down multiplier based on utilization
 - **Familiar**: same clean frequency band drawing style as Intel PG
 - **Customizable**: customizable polling rate and graph capacity
 

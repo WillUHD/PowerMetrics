@@ -23,8 +23,9 @@ struct SettingsView: View {
         Form {
             Section {
                 VStack(alignment: .leading) {
-                    Text("Update Interval: \(updateInterval, specifier: "%.1f")s")
-                    Slider(value: $updateInterval, in: 0.1...3.0, step: 0.1)
+                    // Update interval display with fine decimal precision
+                    Text("Update Interval: \(updateInterval, specifier: "%.2f")s")
+                    Slider(value: $updateInterval, in: 0.25...5.0, step: 0.25)
                 }
                 .padding(.bottom, 10)
                 
@@ -49,15 +50,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let window = NSApp.windows.first {
             window.delegate = self
             window.tabbingMode = .disallowed
-            // Apply initial level/pinning configuration on startup
             MonitorState.shared.updatePinning(window: window)
         }
     }
     
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         MonitorState.shared.stopPolling()
-        // Use orderOut to remove the window from view instead of hiding the entire application process.
-        // This prevents macOS from associating the hidden window with any locked virtual desktop space.
         sender.orderOut(nil)
         return false
     }
@@ -71,11 +69,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 
                 let isPinned = MonitorState.shared.isPinned
                 if isPinned {
-                    // Pinned windows are already globally configured to join all active spaces naturally
                     window.makeKeyAndOrderFront(nil)
                 } else {
-                    // Temporarily apply joint space behavior to draw the window onto your current Space,
-                    // then immediately release it so it stays anchored to this space.
                     let originalBehavior = window.collectionBehavior
                     window.collectionBehavior = originalBehavior.union(.canJoinAllSpaces)
                     window.makeKeyAndOrderFront(nil)
@@ -85,7 +80,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                 }
             }
-            // Return false here to tell SwiftUI we handled the action and to NOT spawn a new duplicate window.
             return false
         }
         return true

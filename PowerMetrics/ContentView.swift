@@ -9,7 +9,7 @@ enum SeriesType: Sendable {
 }
 
 struct ChartPoint: Identifiable, Sendable {
-    let id: Int // Using Int indices avoids expensive UUID allocations
+    let id: Int
     let x: Int
     let y: Double
     let yMin: Double?
@@ -49,6 +49,10 @@ final class MonitorState: ObservableObject {
     
     private let runner = BackgroundMonitorRunner()
     private var isPolling = false
+    private var cancellables = Set<AnyCancellable>()
+    
+    private var lastInterval: Double = 1.0
+    private var lastCapacity: Int = 180
     
     @AppStorage("updateInterval") private var updateInterval: Double = 1.0
     @AppStorage("chartCapacity") private var chartCapacity: Int = 180
@@ -60,13 +64,44 @@ final class MonitorState: ObservableObject {
 
     var isMonitoring: Bool { isPolling }
 
+    init() {
+        let initialInterval = UserDefaults.standard.double(forKey: "updateInterval")
+        let initialCapacity = UserDefaults.standard.integer(forKey: "chartCapacity")
+        lastInterval = initialInterval == 0 ? 1.0 : initialInterval
+        lastCapacity = initialCapacity == 0 ? 180 : initialCapacity
+        
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                let currentInterval = UserDefaults.standard.double(forKey: "updateInterval")
+                let currentCapacity = UserDefaults.standard.integer(forKey: "chartCapacity")
+                
+                let actualInterval = currentInterval == 0 ? 1.0 : currentInterval
+                let actualCapacity = currentCapacity == 0 ? 180 : currentCapacity
+                
+                if actualInterval != self.lastInterval {
+                    self.lastInterval = actualInterval
+                    if self.isPolling {
+                        self.stopPolling()
+                        self.start()
+                    }
+                }
+                
+                if actualCapacity != self.lastCapacity {
+                    self.lastCapacity = actualCapacity
+                }
+            }
+            .store(in: &cancellables)
+    }
+
     func start() {
         errorMessage = nil
         if !isPolling {
             isPolling = true
             
-            let interval = max(0.1, min(3.0, updateInterval))
-            let capacity = chartCapacity
+            let interval = max(0.25, min(5.0, lastInterval))
+            let capacity = lastCapacity
             
             Task {
                 await runner.start(interval: interval, capacity: capacity) { [weak self] snapshot in
@@ -231,7 +266,7 @@ struct CorePlotView: View {
             }
             
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
+                HStack(spacing: 6) {
                     ForEach(series) { s in
                         if !s.name.isEmpty {
                             VStack(alignment: .leading, spacing: 3) {
@@ -240,11 +275,11 @@ struct CorePlotView: View {
                                     Spacer(minLength: 8)
                                     if let minV = s.minCur, let maxV = s.maxCur {
                                         HStack(spacing: 2) {
-                                            Text(String(format: "%.2f", minV)).font(.system(size: 13, weight: .regular)).foregroundStyle(.tertiary)
+                                            Text(String(format: "%.1f", minV)).font(.system(size: 13, weight: .regular)).foregroundStyle(.tertiary)
                                             Text("/").font(.system(size: 13, weight: .regular)).foregroundStyle(.quaternary)
                                             Text(String(format: "%.2f", s.cur)).font(.system(size: 13, weight: .semibold)).tracking(-0.3).foregroundStyle(.primary)
                                             Text("/").font(.system(size: 13, weight: .regular)).foregroundStyle(.quaternary)
-                                            Text(String(format: "%.2f", maxV)).font(.system(size: 13, weight: .regular)).foregroundStyle(.tertiary)
+                                            Text(String(format: "%.1f", maxV)).font(.system(size: 13, weight: .regular)).foregroundStyle(.tertiary)
                                         }
                                     } else {
                                         Text(String(format: "%.2f", s.cur)).font(.system(size: 13, weight: .semibold)).tracking(-0.3).foregroundStyle(.primary)
@@ -257,10 +292,15 @@ struct CorePlotView: View {
                 }
             }
             
-            FastPlotView(series: series, capacity: capacity, shadeRanges: shadeRanges, title: title)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
-                .padding(.trailing, 2)
+            FastPlotView(
+                series: series,
+                capacity: capacity,
+                shadeRanges: shadeRanges,
+                title: title
+            )
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+            .padding(.trailing, 2)
         }
         .padding(10)
         .background(chartBackground)
@@ -274,7 +314,7 @@ struct CorePlotView: View {
         case .cpu: return Color(red: 0.1, green: 0.65, blue: 0.95)
         case .gpu: return Color(red: 0.63, green: 0.82, blue: 0.28)
         case .ane: return Color.orange
-        case .dram: return Color.yellow
+        case .dram: return Color(red: 0.95, green: 0.68, blue: 0.08)
         case .clusterS: return Color(red: 0.6, green: 0.3, blue: 0.9)
         case .clusterP: return Color(red: 0.1, green: 0.65, blue: 0.95)
         case .clusterE: return Color(red: 0.0, green: 0.8, blue: 0.8)
@@ -321,45 +361,84 @@ final class FastPlotNSView: NSView {
     
     override var isFlipped: Bool { true }
     
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        self.needsDisplay = true
+    }
+    
+    override func setBoundsSize(_ newSize: NSSize) {
+        super.setBoundsSize(newSize)
+        self.needsDisplay = true
+    }
+    
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
-        
         let size = bounds.size
-        let labelPadding: CGFloat = 34
-        let plotLeft = labelPadding
-        let plotWidth = size.width - plotLeft
-        let topMargin: CGFloat = 8
-        let plotHeight = size.height - topMargin - 8
-        
         guard let firstSeries = series.first else { return }
-        let yDomain = firstSeries.yDomain
-        let yMin = yDomain.lowerBound
-        let yMax = yDomain.upperBound
-        let yRange = yMax - yMin > 0 ? (yMax - yMin) : 1.0
         
-        func toCoords(x: Int, y: Double) -> CGPoint {
-            let pctX = CGFloat(x) / CGFloat(capacity)
-            let pctY = CGFloat(y - yMin) / CGFloat(yRange)
-            let drawX = plotLeft + (pctX * plotWidth)
-            let drawY = topMargin + plotHeight - (pctY * plotHeight)
-            return CGPoint(x: drawX, y: drawY)
-        }
-        
+        let font = NSFont.systemFont(ofSize: 8, weight: .semibold)
         let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let gridColor = isDark ? NSColor(white: 1.0, alpha: 0.15) : NSColor(white: 0.0, alpha: 0.12)
         let subGridColor = isDark ? NSColor(white: 1.0, alpha: 0.06) : NSColor(white: 0.0, alpha: 0.04)
         let textColor = NSColor.secondaryLabelColor
-        
-        let font = NSFont.systemFont(ofSize: 8, weight: .semibold)
         let textAttrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: textColor
         ]
         
+        // 1. Filter out off-screen values to ensure Y-scaling matches only currently visible data
+        let allActiveVals = series.flatMap { s -> [Double] in
+            let active = s.points.suffix(capacity)
+            return active.map { $0.y } + active.compactMap { $0.yMin } + active.compactMap { $0.yMax }
+        }
+        
+        let yDomain: ClosedRange<Double>
+        if title == "Utilization" {
+            yDomain = 0.0...100.0
+        } else if title == "Temperature" {
+            yDomain = Self.calculateYDomain(vals: allActiveVals, fixedMin: nil, fixedMax: 100)
+        } else {
+            yDomain = Self.calculateYDomain(vals: allActiveVals, fixedMin: 0, fixedMax: nil)
+        }
+        
+        let topMargin: CGFloat = 4
+        let bottomMargin: CGFloat = 4
+        let plotHeight = size.height - topMargin - bottomMargin
+        
+        let ticks = Self.generateTicks(domain: yDomain, height: plotHeight)
+        let yMin = yDomain.lowerBound
+        let yMax = yDomain.upperBound
+        let yRange = yMax - yMin > 0 ? (yMax - yMin) : 1.0
+        let hasFractionalValue = ticks.main.contains { (($0 * 1000).rounded() / 1000).truncatingRemainder(dividingBy: 1) != 0 }
+        
+        // 2. Dynamically calculate padding width for each individual chart based on string length of visible axis labels
+        var maxLabelWidth: CGFloat = 0
+        for val in ticks.main {
+            let labelStr = formatAxis(val, hasFractional: hasFractionalValue)
+            let textSize = NSAttributedString(string: labelStr, attributes: textAttrs).size()
+            maxLabelWidth = max(maxLabelWidth, textSize.width)
+        }
+        
+        let plotLeft = max(8, maxLabelWidth + 3)
+        let plotRight = size.width - 2
+        let plotWidth = plotRight - plotLeft
+        
+        // 4pt padding gap so active line drawings don't visually merge with axis labels
+        let plotDataLeft = plotLeft + 4
+        let plotDataWidth = plotRight - plotDataLeft
+        
+        func toCoords(x: Int, y: Double) -> CGPoint {
+            let pctX = CGFloat(x) / CGFloat(capacity)
+            let pctY = CGFloat(y - yMin) / CGFloat(yRange)
+            let drawX = plotDataLeft + (pctX * plotDataWidth)
+            let drawY = topMargin + plotHeight - (pctY * plotHeight)
+            return CGPoint(x: drawX, y: drawY)
+        }
+        
         context.setLineWidth(0.5)
         
-        // 1. Draw Axis Ticks & Label Text
-        for val in firstSeries.mainTicks {
+        // 3. Draw Axis Ticks & Label Text
+        for val in ticks.main {
             let p = toCoords(x: 0, y: val)
             
             context.saveGState()
@@ -367,15 +446,15 @@ final class FastPlotNSView: NSView {
             context.setLineDash(phase: 0, lengths: [2, 3])
             context.beginPath()
             context.move(to: CGPoint(x: plotLeft, y: p.y))
-            context.addLine(to: CGPoint(x: size.width, y: p.y))
+            context.addLine(to: CGPoint(x: plotRight, y: p.y))
             context.strokePath()
             context.restoreGState()
             
-            let labelStr = formatAxis(val, hasFractional: firstSeries.hasFractionalValue)
+            let labelStr = formatAxis(val, hasFractional: hasFractionalValue)
             let attributedString = NSAttributedString(string: labelStr, attributes: textAttrs)
             let textSize = attributedString.size()
             let textRect = NSRect(
-                x: plotLeft - textSize.width - 4,
+                x: plotLeft - textSize.width - 2,
                 y: p.y - textSize.height / 2,
                 width: textSize.width,
                 height: textSize.height
@@ -383,35 +462,41 @@ final class FastPlotNSView: NSView {
             attributedString.draw(in: textRect)
         }
         
-        for val in firstSeries.subTicks {
+        for val in ticks.sub {
             let p = toCoords(x: 0, y: val)
             context.saveGState()
             context.setStrokeColor(subGridColor.cgColor)
             context.setLineDash(phase: 0, lengths: [2, 3])
             context.beginPath()
             context.move(to: CGPoint(x: plotLeft, y: p.y))
-            context.addLine(to: CGPoint(x: size.width, y: p.y))
+            context.addLine(to: CGPoint(x: plotRight, y: p.y))
             context.strokePath()
             context.restoreGState()
         }
         
-        // 2. Draw Shade Areas
+        // 4. Draw Shade Areas
         for s in series {
             let hasBand = shadeRanges.contains { $0.maxId == s.id || (title == "Temperature" && s.id == "CPU_AVG") }
-            if hasBand && s.points.count > 1 {
+            let points = s.points
+            let takeCount = min(capacity, points.count)
+            let activePoints = Array(points.suffix(takeCount))
+            
+            if hasBand && activePoints.count > 1 {
                 context.saveGState()
                 let path = CGMutablePath()
-                let first = s.points[0]
-                let p0 = toCoords(x: first.x, y: first.yMax ?? first.y)
+                let offset = capacity - takeCount
+                
+                let first = activePoints[0]
+                let p0 = toCoords(x: 0 + offset, y: first.yMax ?? first.y)
                 path.move(to: p0)
                 
-                for i in 1..<s.points.count {
-                    let pt = s.points[i]
-                    path.addLine(to: toCoords(x: pt.x, y: pt.yMax ?? pt.y))
+                for i in 1..<activePoints.count {
+                    let pt = activePoints[i]
+                    path.addLine(to: toCoords(x: i + offset, y: pt.yMax ?? pt.y))
                 }
-                for i in stride(from: s.points.count - 1, through: 0, by: -1) {
-                    let pt = s.points[i]
-                    path.addLine(to: toCoords(x: pt.x, y: pt.yMin ?? pt.y))
+                for i in stride(from: activePoints.count - 1, through: 0, by: -1) {
+                    let pt = activePoints[i]
+                    path.addLine(to: toCoords(x: i + offset, y: pt.yMin ?? pt.y))
                 }
                 path.closeSubpath()
                 context.addPath(path)
@@ -422,11 +507,28 @@ final class FastPlotNSView: NSView {
             }
         }
         
-        // 3. Render Trend Lines
-        let orderedSeries = series.filter({ $0.id == "GPU" }) + series.filter({ $0.id != "GPU" })
+        // 5. Render Trend Lines (Order: ANE -> DRAM -> GPU -> CORE -> PKG)
+        let orderedSeries: [UIChartSeries]
+        if title == "Power" {
+            let orderMap: [String: Int] = [
+                "ANE": 0,
+                "DRAM": 1,
+                "GPU": 2,
+                "CPU": 3,
+                "PKG": 4
+            ]
+            orderedSeries = series.sorted { s1, s2 in
+                (orderMap[s1.id] ?? 99) < (orderMap[s2.id] ?? 99)
+            }
+        } else {
+            orderedSeries = series.filter({ $0.id == "GPU" }) + series.filter({ $0.id != "GPU" })
+        }
+        
         for s in orderedSeries {
             let points = s.points
-            guard points.count > 1 else { continue }
+            let takeCount = min(capacity, points.count)
+            let activePoints = Array(points.suffix(takeCount))
+            guard activePoints.count > 1 else { continue }
             
             let isMaxLine = s.id.contains("MAX") || s.id == "CPU_MAX"
             let isMinLine = s.id.contains("MIN") || s.id == "CPU_MIN"
@@ -443,11 +545,12 @@ final class FastPlotNSView: NSView {
                 context.setStrokeColor(strokeColor.cgColor)
                 
                 context.beginPath()
-                let p0 = toCoords(x: points[0].x, y: isMaxLine ? (points[0].yMax ?? points[0].y) : points[0].y)
+                let offset = capacity - takeCount
+                let p0 = toCoords(x: 0 + offset, y: isMaxLine ? (activePoints[0].yMax ?? activePoints[0].y) : activePoints[0].y)
                 context.move(to: p0)
                 
-                for i in 1..<points.count {
-                    let p = toCoords(x: points[i].x, y: isMaxLine ? (points[i].yMax ?? points[i].y) : points[i].y)
+                for i in 1..<activePoints.count {
+                    let p = toCoords(x: i + offset, y: isMaxLine ? (activePoints[i].yMax ?? activePoints[i].y) : activePoints[i].y)
                     context.addLine(to: p)
                 }
                 context.strokePath()
@@ -464,9 +567,11 @@ final class FastPlotNSView: NSView {
                 
                 context.beginPath()
                 var hasStarted = false
-                for pt in points {
+                let offset = capacity - takeCount
+                for i in 0..<activePoints.count {
+                    let pt = activePoints[i]
                     if let yMax = pt.yMax {
-                        let pDraw = toCoords(x: pt.x, y: yMax)
+                        let pDraw = toCoords(x: i + offset, y: yMax)
                         if !hasStarted {
                             context.move(to: pDraw)
                             hasStarted = true
@@ -489,7 +594,7 @@ final class FastPlotNSView: NSView {
         case .cpu: return NSColor(red: 0.1, green: 0.65, blue: 0.95, alpha: 1.0)
         case .gpu: return NSColor(red: 0.63, green: 0.82, blue: 0.28, alpha: 1.0)
         case .ane: return NSColor.orange
-        case .dram: return NSColor.yellow
+        case .dram: return NSColor(red: 0.95, green: 0.68, blue: 0.08, alpha: 1.0)
         case .clusterS: return NSColor(red: 0.6, green: 0.3, blue: 0.9, alpha: 1.0)
         case .clusterP: return NSColor(red: 0.1, green: 0.65, blue: 0.95, alpha: 1.0)
         case .clusterE: return NSColor(red: 0.0, green: 0.8, blue: 0.8, alpha: 1.0)
@@ -498,6 +603,46 @@ final class FastPlotNSView: NSView {
     
     private func formatAxis(_ v: Double, hasFractional: Bool) -> String {
         return hasFractional ? String(format: "%.1f", v) : String(format: "%.0f", v)
+    }
+    
+    // Static Y-Axis Scaling & Ticking methods moved directly to drawing logic
+    private static func calculateYDomain(vals: [Double], fixedMin: Double?, fixedMax: Double?) -> ClosedRange<Double> {
+        let dMin = vals.min() ?? 0
+        let dMax = vals.max() ?? 10
+        let diff = max(dMax - dMin, 0.1)
+        
+        let minBound = fixedMin ?? max(0, dMin - diff * 0.01)
+        let maxBound: Double
+        if let fMax = fixedMax {
+            maxBound = dMax > fMax ? dMax + diff * 0.01 : fMax
+        } else {
+            maxBound = dMax + diff * 0.03
+        }
+        return minBound...maxBound
+    }
+    
+    private static func generateTicks(domain: ClosedRange<Double>, height: CGFloat) -> (main: [Double], sub: [Double]) {
+        let span = domain.upperBound - domain.lowerBound
+        let safeSpan = max(span, 0.001)
+        let safeTargetStep = safeSpan / Double(max(1, height / 25.0))
+        let mag = pow(10.0, floor(log10(safeTargetStep)))
+        let base = safeTargetStep / mag
+        let step = (base <= 1.5 ? 1 : base <= 3 ? 2 : base <= 7 ? 5 : 10) * mag
+        
+        let start = floor(domain.lowerBound / step) * step
+        var main: [Double] = []
+        var sub: [Double] = []
+        
+        var v = start
+        var loopSafetyCount = 0
+        while v <= domain.upperBound + (step * 0.1) && loopSafetyCount < 100 {
+            if v >= domain.lowerBound && v <= domain.upperBound { main.append(v) }
+            let s = v + (step / 2.0)
+            if s >= domain.lowerBound && s <= domain.upperBound { sub.append(s) }
+            v += step
+            loopSafetyCount += 1
+        }
+        return (main, sub)
     }
 }
 

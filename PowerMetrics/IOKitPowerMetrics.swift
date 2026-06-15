@@ -754,6 +754,12 @@ struct RingBuffer: Sendable {
         }
         return Array(array[head..<capacity] + array[0..<head])
     }
+    
+    func lastValues(_ n: Int) -> [Double] {
+        let all = self.values
+        let takeCount = min(n, all.count)
+        return Array(all.suffix(takeCount))
+    }
 }
 
 // MARK: - Safe Background Monitor Actor
@@ -761,6 +767,7 @@ struct RingBuffer: Sendable {
 actor BackgroundMonitorRunner {
     private var isPolling = false
     private var pollTask: Task<Void, Never>?
+    private var activeCapacity: Int = 180
     
     private var powerHistory: [String: RingBuffer] = [:]
     private var freqHistory: [String: RingBuffer] = [:]
@@ -769,6 +776,7 @@ actor BackgroundMonitorRunner {
     
     func start(interval: Double, capacity: Int, updateHandler: @escaping @Sendable (PresentationSnapshot) -> Void) {
         stop()
+        activeCapacity = capacity
         isPolling = true
         pollTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
@@ -779,7 +787,8 @@ actor BackgroundMonitorRunner {
             while await self.getIsPolling() && !Task.isCancelled {
                 let sample = IOKitPowerMetrics.shared.sample()
                 if sample.valid {
-                    let presentation = await self.processSample(sample, capacity: capacity)
+                    let cap = await self.getActiveCapacity()
+                    let presentation = await self.processSample(sample, capacity: cap)
                     updateHandler(presentation)
                 }
                 
@@ -794,17 +803,27 @@ actor BackgroundMonitorRunner {
         pollTask = nil
     }
     
+    func updateCapacity(_ capacity: Int) {
+        self.activeCapacity = capacity
+    }
+    
+    private func getActiveCapacity() -> Int {
+        return activeCapacity
+    }
+    
     private func getIsPolling() -> Bool {
         return isPolling
     }
     
     private func processSample(_ s: HardwareSnapshot, capacity: Int) -> PresentationSnapshot {
-        appendHistory(s, capacity: capacity)
+        appendHistory(s)
         
-        let power = buildPowerSeries(s, capacity: capacity)
-        let freq = buildFreqSeries(s, capacity: capacity)
-        let temp = buildTempSeries(s, capacity: capacity)
-        let util = buildUtilSeries(s, capacity: capacity)
+        // Always build full 360-point internal vectors so rendering can dynamically scale on slice
+        let maxCapacity = 360
+        let power = buildPowerSeries(s, capacity: maxCapacity)
+        let freq = buildFreqSeries(s, capacity: maxCapacity)
+        let temp = buildTempSeries(s, capacity: maxCapacity)
+        let util = buildUtilSeries(s, capacity: maxCapacity)
         
         return PresentationSnapshot(
             snap: s,
@@ -815,10 +834,10 @@ actor BackgroundMonitorRunner {
         )
     }
     
-    private func appendHistory(_ s: HardwareSnapshot, capacity: Int) {
+    private func appendHistory(_ s: HardwareSnapshot) {
         func add(_ dict: inout [String: RingBuffer], key: String, val: Double) {
-            if dict[key] == nil || dict[key]!.capacity != capacity {
-                dict[key] = RingBuffer(capacity: capacity)
+            if dict[key] == nil {
+                dict[key] = RingBuffer(capacity: 360)
             }
             dict[key]!.append(val)
         }
@@ -855,12 +874,12 @@ actor BackgroundMonitorRunner {
             ))
         }
         
-        addSeries(id: "PKG", name: "PKG", type: .pkg, vals: powerHistory["PKG"]?.values ?? [], cur: s.packagePower)
-        addSeries(id: "CPU", name: "CORE", type: .cpu, vals: powerHistory["CPU"]?.values ?? [], cur: s.power.cpuPower)
-        addSeries(id: "GPU", name: "GPU", type: .gpu, vals: powerHistory["GPU"]?.values ?? [], cur: s.power.gpuPower)
-        addSeries(id: "ANE", name: "ANE", type: .ane, vals: powerHistory["ANE"]?.values ?? [], cur: s.power.anePower)
+        addSeries(id: "PKG", name: "PKG", type: .pkg, vals: powerHistory["PKG"]?.lastValues(capacity) ?? [], cur: s.packagePower)
+        addSeries(id: "CPU", name: "CORE", type: .cpu, vals: powerHistory["CPU"]?.lastValues(capacity) ?? [], cur: s.power.cpuPower)
+        addSeries(id: "GPU", name: "GPU", type: .gpu, vals: powerHistory["GPU"]?.lastValues(capacity) ?? [], cur: s.power.gpuPower)
+        addSeries(id: "ANE", name: "ANE", type: .ane, vals: powerHistory["ANE"]?.lastValues(capacity) ?? [], cur: s.power.anePower)
         if s.power.dramPower > 0 {
-            addSeries(id: "DRAM", name: "DRAM", type: .dram, vals: powerHistory["DRAM"]?.values ?? [], cur: s.power.dramPower)
+            addSeries(id: "DRAM", name: "DRAM", type: .dram, vals: powerHistory["DRAM"]?.lastValues(capacity) ?? [], cur: s.power.dramPower)
         }
         
         let allVals = series.flatMap { s in s.points.map { $0.y } }
@@ -883,9 +902,9 @@ actor BackgroundMonitorRunner {
             let label = "\(c.name)-CORES"
             let type: SeriesType = c.name == "S" ? .clusterS : (c.name == "P" ? .clusterP : .clusterE)
             
-            let vals = freqHistory[c.name]?.values ?? []
-            let minVals = freqHistory["\(c.name)_MIN"]?.values ?? []
-            let maxVals = freqHistory["\(c.name)_MAX"]?.values ?? []
+            let vals = freqHistory[c.name]?.lastValues(capacity) ?? []
+            let minVals = freqHistory["\(c.name)_MIN"]?.lastValues(capacity) ?? []
+            let maxVals = freqHistory["\(c.name)_MAX"]?.lastValues(capacity) ?? []
             let points = Self.buildPoints(vals: vals, minVals: minVals, maxVals: maxVals, capacity: capacity)
             
             series.append(UIChartSeries(
@@ -897,7 +916,7 @@ actor BackgroundMonitorRunner {
             ))
         }
         
-        let gpuVals = freqHistory["GPU"]?.values ?? []
+        let gpuVals = freqHistory["GPU"]?.lastValues(capacity) ?? []
         let gpuPoints = Self.buildPoints(vals: gpuVals, minVals: nil, maxVals: nil, capacity: capacity)
         series.append(UIChartSeries(
             id: "GPU", name: "GPU", seriesType: .gpu, points: gpuPoints,
@@ -928,9 +947,9 @@ actor BackgroundMonitorRunner {
         let g = get("GPU")
         
         if avg > 0 {
-            let vals = tempHistory["CPU_AVG"]?.values ?? []
-            let minVals = tempHistory["CPU_MIN"]?.values ?? []
-            let maxVals = tempHistory["CPU_MAX"]?.values ?? []
+            let vals = tempHistory["CPU_AVG"]?.lastValues(capacity) ?? []
+            let minVals = tempHistory["CPU_MIN"]?.lastValues(capacity) ?? []
+            let maxVals = tempHistory["CPU_MAX"]?.lastValues(capacity) ?? []
             let points = Self.buildPoints(vals: vals, minVals: minVals, maxVals: maxVals, capacity: capacity)
             
             series.append(UIChartSeries(
@@ -943,7 +962,7 @@ actor BackgroundMonitorRunner {
         }
         
         if g > 0 {
-            let vals = tempHistory["GPU"]?.values ?? []
+            let vals = tempHistory["GPU"]?.lastValues(capacity) ?? []
             let points = Self.buildPoints(vals: vals, minVals: nil, maxVals: nil, capacity: capacity)
             
             series.append(UIChartSeries(
@@ -973,7 +992,7 @@ actor BackgroundMonitorRunner {
             let label = "\(c.name)-CORE"
             let type: SeriesType = c.name == "S" ? .clusterS : (c.name == "P" ? .clusterP : .clusterE)
             
-            let vals = utilHistory[c.name]?.values ?? []
+            let vals = utilHistory[c.name]?.lastValues(capacity) ?? []
             let points = Self.buildPoints(vals: vals, minVals: nil, maxVals: nil, capacity: capacity)
             
             series.append(UIChartSeries(
@@ -983,7 +1002,7 @@ actor BackgroundMonitorRunner {
             ))
         }
         
-        let gpuVals = utilHistory["GPU"]?.values ?? []
+        let gpuVals = utilHistory["GPU"]?.lastValues(capacity) ?? []
         let gpuPoints = Self.buildPoints(vals: gpuVals, minVals: nil, maxVals: nil, capacity: capacity)
         series.append(UIChartSeries(
             id: "GPU", name: "GPU", seriesType: .gpu, points: gpuPoints,
@@ -1030,12 +1049,12 @@ actor BackgroundMonitorRunner {
         let dMax = vals.max() ?? 10
         let diff = max(dMax - dMin, 0.1)
         
-        let minBound = fixedMin ?? max(0, dMin - diff * 0.05)
+        let minBound = fixedMin ?? max(0, dMin - diff * 0.01)
         let maxBound: Double
         if let fMax = fixedMax {
-            maxBound = dMax > fMax ? dMax + diff * 0.1 : fMax
+            maxBound = dMax > fMax ? dMax + diff * 0.01 : fMax
         } else {
-            maxBound = dMax + diff * 0.15
+            maxBound = dMax + diff * 0.03
         }
         return minBound...maxBound
     }

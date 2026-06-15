@@ -259,6 +259,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Power Metrics";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Authenticate to access GPU power monitoring";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -295,6 +296,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Power Metrics";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Authenticate to access GPU power monitoring";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";

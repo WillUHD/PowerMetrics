@@ -737,7 +737,14 @@ struct RingBuffer: Sendable {
         self.array = Array(repeating: 0.0, count: maxCapacity)
     }
     
-    mutating func append(_ value: Double) {
+    // Explicitly mark as nonisolated to prevent MainActor inference
+    mutating nonisolated func append(_ value: Double) {
+        // Because this is mutating, we need to ensure the caller has
+        // exclusive access. Since it's a value type inside an actor,
+        // the actor provides this safety.
+        
+        // Note: 'mutating' and 'nonisolated' on a struct is standard
+        // for value types used across actors.
         if count < capacity {
             array[count] = value
             count += 1
@@ -747,7 +754,8 @@ struct RingBuffer: Sendable {
         }
     }
     
-    var values: [Double] {
+    // Explicitly mark as nonisolated
+    nonisolated var values: [Double] {
         guard count > 0 else { return [] }
         if count < capacity {
             return Array(array[0..<count])
@@ -755,7 +763,8 @@ struct RingBuffer: Sendable {
         return Array(array[head..<capacity] + array[0..<head])
     }
     
-    func lastValues(_ n: Int) -> [Double] {
+    // Explicitly mark as nonisolated
+    nonisolated func lastValues(_ n: Int) -> [Double] {
         let all = self.values
         let takeCount = min(n, all.count)
         return Array(all.suffix(takeCount))
@@ -774,25 +783,34 @@ actor BackgroundMonitorRunner {
     private var utilHistory: [String: RingBuffer] = [:]
     private var tempHistory: [String: RingBuffer] = [:]
     
-    func start(interval: Double, capacity: Int, updateHandler: @escaping @Sendable (PresentationSnapshot) -> Void) {
-        stop()
-        activeCapacity = capacity
-        isPolling = true
-        pollTask = Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
-            
-            let initialized = await IOKitPowerMetrics.shared.start()
-            guard initialized else { return }
-            
-            while await self.getIsPolling() && !Task.isCancelled {
-                let sample = await IOKitPowerMetrics.shared.sample()
-                if sample.valid {
-                    let cap = await self.getActiveCapacity()
-                    let presentation = await self.processSample(sample, capacity: cap)
-                    updateHandler(presentation)
+    // Returns a stream that the UI can "listen" to
+    func snapshots(interval: Double, capacity: Int) -> AsyncStream<PresentationSnapshot> {
+        AsyncStream { continuation in
+            let task = Task.detached(priority: .userInitiated) { [weak self] in
+                guard let self = self else { return }
+                
+                let initialized = await IOKitPowerMetrics.shared.start()
+                guard initialized else {
+                    continuation.finish()
+                    return
                 }
                 
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                while !Task.isCancelled {
+                    let sample = await IOKitPowerMetrics.shared.sample()
+                    if sample.valid {
+                        // Process the sample on the actor
+                        let presentation = await self.processSample(sample, capacity: capacity)
+                        // Send it to the listener
+                        continuation.yield(presentation)
+                    }
+                    
+                    try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                }
+                continuation.finish()
+            }
+            
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
     }

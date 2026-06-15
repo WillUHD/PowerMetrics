@@ -54,6 +54,8 @@ final class MonitorState: ObservableObject {
     private var lastInterval: Double = 1.0
     private var lastCapacity: Int = 180
     
+    private var monitorTask: Task<Void, Never>? // Keep track of the task so we can stop it
+    
     @AppStorage("updateInterval") private var updateInterval: Double = 1.0
     @AppStorage("chartCapacity") private var chartCapacity: Int = 180
     @AppStorage("isPinned") var isPinned: Bool = false {
@@ -96,35 +98,32 @@ final class MonitorState: ObservableObject {
     }
 
     func start() {
-        errorMessage = nil
-        if !isPolling {
+            guard !isPolling else { return }
             isPolling = true
+            errorMessage = nil
             
             let interval = max(0.25, min(5.0, lastInterval))
             let capacity = lastCapacity
             
-            Task {
-                await runner.start(interval: interval, capacity: capacity) { [weak self] snapshot in
-                    Task { @MainActor in
-                        guard let self = self, self.isPolling else { return }
-                        var transaction = Transaction()
-                        transaction.animation = nil
-                        withTransaction(transaction) {
-                            self.presentation = snapshot
-                        }
-                    }
+            // Start a task on the MainActor
+            monitorTask = Task {
+                // We await the stream from the background actor
+                let stream = await runner.snapshots(interval: interval, capacity: capacity)
+                
+                // This loop runs on the MainActor because the Task is inside a @MainActor class
+                for await snapshot in stream {
+                    // No need for [weak self] or manual Task { @MainActor }
+                    // The isolation is now guaranteed by the loop context
+                    self.presentation = snapshot
                 }
             }
         }
-    }
 
-    func stopPolling() {
-        guard isPolling else { return }
-        isPolling = false
-        Task {
-            await runner.stop()
+        func stopPolling() {
+            isPolling = false
+            monitorTask?.cancel() // This automatically stops the loop and the background task
+            monitorTask = nil
         }
-    }
     
     func updatePinning(window: NSWindow? = nil) {
         guard let win = window ?? NSApp.windows.first else { return }

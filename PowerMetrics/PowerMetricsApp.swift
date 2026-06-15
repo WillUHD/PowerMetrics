@@ -37,7 +37,7 @@ struct SettingsView: View {
         }
         .padding(20)
         .frame(width: 350)
-        .navigationTitle("Power Gadget Settings")
+        .navigationTitle("Power Metrics Settings")
     }
 }
 

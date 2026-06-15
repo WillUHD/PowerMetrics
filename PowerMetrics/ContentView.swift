@@ -374,7 +374,7 @@ final class FastPlotNSView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         let size = bounds.size
-        guard let firstSeries = series.first else { return }
+        guard series.first != nil else { return }
         
         let font = NSFont.systemFont(ofSize: 8, weight: .semibold)
         let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -421,7 +421,7 @@ final class FastPlotNSView: NSView {
         
         let plotLeft = max(8, maxLabelWidth + 3)
         let plotRight = size.width - 2
-        let plotWidth = plotRight - plotLeft
+        _ = plotRight - plotLeft
         
         // 4pt padding gap so active line drawings don't visually merge with axis labels
         let plotDataLeft = plotLeft + 4

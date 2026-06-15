@@ -781,11 +781,11 @@ actor BackgroundMonitorRunner {
         pollTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
             
-            let initialized = IOKitPowerMetrics.shared.start()
+            let initialized = await IOKitPowerMetrics.shared.start()
             guard initialized else { return }
             
             while await self.getIsPolling() && !Task.isCancelled {
-                let sample = IOKitPowerMetrics.shared.sample()
+                let sample = await IOKitPowerMetrics.shared.sample()
                 if sample.valid {
                     let cap = await self.getActiveCapacity()
                     let presentation = await self.processSample(sample, capacity: cap)
